@@ -42,6 +42,24 @@ from config import (
 from geometry import validate_geom
 
 
+####################
+### PROFILING ######
+####################
+import time
+from functools import wraps
+
+def timing(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        end = time.perf_counter()
+        print(f"{func.__name__} took {end - start:.6f} seconds")
+        return result
+    return wrapper
+
+
+
 # ============================================================================
 # FARSITE CONFIGURATION FILE
 # ============================================================================
@@ -271,34 +289,16 @@ class Farsite:
         Returns:
             Shapely geometry or None if no output found
         """
-        base = self.outpath
-        out_dir = os.path.dirname(base)
-        
-        # Look for shapefiles with matching prefix
-        candidates = []
-        candidates += glob.glob(base + "*.shp")
-        candidates += glob.glob(os.path.join(out_dir, "*.shp"))
-        
-        # Deduplicate and sort by modification time
-        candidates = sorted(set(candidates), key=os.path.getmtime, reverse=True)
-        
-        if not candidates:
-            print(f"No shapefile candidates found for outpath prefix={base} (dir={out_dir})")
+        output_path = self.outpath + '_Perimeters.shp'
+        if not os.path.exists(output_path):
             return None
         
-        # Try newest files first
-        for shp in candidates[:25]:
-            try:
-                gdf = gpd.read_file(shp)
-            except Exception:
-                continue
-            if len(gdf) == 0:
-                continue
-            
-            geom = unary_union(list(gdf.geometry.values))
-            return geom
+        gdf = gpd.read_file(output_path)
+        if len(gdf) == 0:
+            return None
         
-        return None
+        geom = gdf['geometry'][0]
+        return Polygon(geom.coords)
 
 
 # ============================================================================
@@ -313,12 +313,15 @@ def cleanup_farsite_outputs(run_id, base_dir):
         run_id: Unique run identifier (uuid hex string)
         base_dir: Base directory to clean
     """
+    # return None
     base_dir = Path(base_dir)
     for p in base_dir.glob(f"{run_id}_*"):
         if p.is_dir():
             shutil.rmtree(p, ignore_errors=True)
         else:
             p.unlink(missing_ok=True)
+
+
 
 
 # ============================================================================
@@ -372,7 +375,7 @@ def forward_pass_farsite(poly, params, start_time, lcppath,
             perim_res=perim_res,
             debug=debug
         )
-        farsite.id = run_id   # Share ID so cleanup catches all files
+        # farsite.id = run_id   # Share ID so cleanup catches all files
         
         farsite.run()
         out = farsite.output_geom()
@@ -387,7 +390,7 @@ def forward_pass_farsite(poly, params, start_time, lcppath,
     remaining_dt = dt - number_of_farsites * datetime.timedelta(minutes=MAX_SIM)
     if remaining_dt < datetime.timedelta(minutes=10):
         cleanup_farsite_outputs(run_id, str(FARSITE_TMP_DIR))
-        print("FARSITE outputs cleaned")
+        # print("FARSITE outputs cleaned")
         return poly
     
     new_params = {
@@ -403,7 +406,7 @@ def forward_pass_farsite(poly, params, start_time, lcppath,
         perim_res=perim_res,
         debug=debug
     )
-    farsite.id = run_id   # Share ID so cleanup catches all files
+    # farsite.id = run_id   # Share ID so cleanup catches all files
     
     farsite.run()
     out = farsite.output_geom()
@@ -412,8 +415,8 @@ def forward_pass_farsite(poly, params, start_time, lcppath,
         print("No output perimeter produced; keeping outputs for inspection.")
         return None
     
-    cleanup_farsite_outputs(run_id, str(FARSITE_TMP_DIR))
-    print("FARSITE outputs cleaned")
+    cleanup_farsite_outputs(farsite.id, str(FARSITE_TMP_DIR))
+    # print("FARSITE outputs cleaned")
     
     return out
 
@@ -457,7 +460,7 @@ def forward_pass_farsite_24h(poly, params, start_time, lcppath,
         warnings.warn(f"perim_res ({perim_res}) must be 1-500. Setting to 500")
         perim_res = 500
 
-    run_id    = uuid.uuid4().hex
+    # run_id    = uuid.uuid4().hex
     
     max_step = datetime.timedelta(minutes=max_step_minutes)
     remaining = total_dt
@@ -484,7 +487,7 @@ def forward_pass_farsite_24h(poly, params, start_time, lcppath,
             perim_res=perim_res,
             debug=debug,
         )
-        farsite.id = run_id   # Share ID so cleanup catches all files
+        # farsite.id = run_id   # Share ID so cleanup catches all files
         farsite.run(ncores=4)
         
         out = farsite.output_geom()
@@ -502,6 +505,6 @@ def forward_pass_farsite_24h(poly, params, start_time, lcppath,
         step_idx += 1
     
     cleanup_farsite_outputs(run_id, str(FARSITE_TMP_DIR))
-    print("FARSITE outputs cleaned")
+    # print("FARSITE outputs cleaned")
     
     return poly

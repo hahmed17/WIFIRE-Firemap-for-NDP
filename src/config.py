@@ -68,7 +68,7 @@ WRITE_OUTPUTS_EACH_TIMESTEP = 0
 # ============================================================================
 # ENKF PARAMETERS
 # ============================================================================
-MAX_ENSEMBLE_SIZE       = 300
+MIN_ENSEMBLE_SIZE       = 300
 ENSEMBLE_SIZE_MULTIPLIER = 5
 
 DEFAULT_OBSERVATION_NOISE = 500    # vsize (meters)
@@ -103,7 +103,7 @@ def ensure_directories():
 
 def get_ensemble_size(n_vertices):
     """Calculate ensemble size based on number of vertices."""
-    return min(MAX_ENSEMBLE_SIZE, ENSEMBLE_SIZE_MULTIPLIER * n_vertices)
+    return max(MIN_ENSEMBLE_SIZE, ENSEMBLE_SIZE_MULTIPLIER * n_vertices)
 
 
 # Ensure directories exist on import
