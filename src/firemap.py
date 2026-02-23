@@ -29,7 +29,7 @@ def _multipolygon_to_polygon(geom):
         raise TypeError(f"Unsupported geometry type: {type(geom)}")
 
 
-def fetch_fire_perimeters(fire_name, year, verbose=True):
+def fetch_fire_perimeters(fire_name, year, verbose=True, synthetic=False):
     """
     Fetch all mapped perimeters for a fire from WIFIRE Firemap GeoServer (WFS).
 
@@ -37,6 +37,7 @@ def fetch_fire_perimeters(fire_name, year, verbose=True):
         fire_name: Fire name exactly as it appears in the database (e.g. "BORDER 2")
         year: Fire year (e.g. 2025)
         verbose: Print progress
+        synthetic: Loads the synthetic fire from the local filesystem; no Firemap query
 
     Returns:
         GeoDataFrame with columns including 'datetime', 'acres', 'geometry',
@@ -55,9 +56,13 @@ def fetch_fire_perimeters(fire_name, year, verbose=True):
         "SRSNAME":      "EPSG:4326",
     }
 
-    response = requests.get(FIREMAP_WFS_URL, params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
+    if synthetic:
+        raise NotImplementedError('Load synthetic fire perimeter not yet implemented!!')
+        data = load_synthetic_fire_perimeter()
+    else:
+        response = requests.get(FIREMAP_WFS_URL, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
 
     features = data.get("features", [])
     if not features:
@@ -104,6 +109,70 @@ def fetch_fire_perimeters(fire_name, year, verbose=True):
 # ============================================================================
 # WEATHER RETRIEVAL
 # ============================================================================
+def query_weather_for_timestep(lat, lon, start_time, end_time, verbose=False, synthetic=False):
+    """
+    Query weather data for a specific timestep.
+    
+    Args:
+        lat: Latitude (WGS84)
+        lon: Longitude (WGS84)
+        start_time: Start datetime (pandas Timestamp)
+        end_time: End datetime (pandas Timestamp)
+        verbose: Print query details
+        synthetic: Loads the synthetic weather data from the local filesystem
+        
+    Returns:
+        tuple: (wind_speed_list, wind_direction_list)
+    """
+    # Convert to ISO format
+    start_iso = start_time.isoformat()
+    end_iso = end_time.isoformat()
+    
+    if verbose:
+        print(f"  Querying weather: {start_time} to {end_time}")
+    
+    # Query Firemap API
+    timestamp = int(time.time() * 1000)
+    wx_params = {
+        'selection': 'closestTo',
+        'lat': str(lat),
+        'lon': str(lon),
+        'observable': ['wind_speed', 'wind_direction'],
+        'from': start_iso,
+        'to': end_iso,
+        'callback': 'wxData',
+        '_': str(timestamp)
+    }
+    if synthetic:
+        raise NotImplementedError('Load synthetic weather data not yet implemented!!')
+        wind_speed_list, wind_direction_list = load_synthetic_weather_data()
+    else:
+        try:
+            wx_response = requests.get(FIREMAP_WX_URL, params=wx_params, timeout=10)
+            wx_text = wx_response.text.strip()
+            
+            # Remove JSONP wrapper
+            if wx_text.startswith('wxData(') and wx_text.endswith(')'):
+                wx_json = wx_text[len('wxData('):-1]
+                wx_obs = json.loads(wx_json)
+            else:
+                wx_obs = wx_response.json()
+            
+            wind_speed_list = wx_obs["features"][0]["properties"]["wind_speed"]
+            wind_direction_list = wx_obs["features"][0]["properties"]["wind_direction"]
+            
+            if verbose:
+                print(f"  Retrieved {len(wind_speed_list)} observations")
+                print(f"  Wind: {np.mean(wind_speed_list):.1f} mph @ {np.mean(wind_direction_list):.0f}°")
+            
+            return wind_speed_list, wind_direction_list
+            
+        except Exception as e:
+            print(f"  WARNING: Weather query failed: {e}")
+            print(f"  Using fallback values")
+            # Return fallback values
+            return [10.0], [225.0]  # Default 10 mph from SW
+
 
 def fetch_weather(lat, lon, start_dt, end_dt, verbose=True):
     """
