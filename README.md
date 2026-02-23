@@ -1,7 +1,7 @@
  ## Run dependencies installation script
 ```
-chmod +x src/install_packages.sh
-./src/install_packages.sh
+chmod +x ./install_packages.sh
+./install_packages.sh
 ```
 
 ## Notebook execution order
