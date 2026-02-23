@@ -1,7 +1,7 @@
 {
   "fire_name": "SyntheticFire",
   "year": 2020,
-  "lcp_path": "landscape.lcp",
+  "lcp_path": "/home/jovyan/work/WIFIRE-Digital-Twinners/wildfire-digital-twin/data/fire_perimeters/SyntheticFire.lcp",
   "ignition_date": "2020-01-01T00:00:00",
   "containment_date": "2020-01-01T12:00:00",
   "duration_days": 1,
@@ -11,5 +11,6 @@
     "lat": 32.595886593540015,
     "lon": -116.85708743001499
   },
-  "data_source": "Synthetic Fire generated in FARSITE"
+  "data_source": "Synthetic Fire generated in FARSITE",
+  "synthetic": true
 }

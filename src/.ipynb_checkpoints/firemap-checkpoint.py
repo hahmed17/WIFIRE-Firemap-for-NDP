@@ -130,23 +130,27 @@ def query_weather_for_timestep(lat, lon, start_time, end_time, verbose=False, sy
     
     if verbose:
         print(f"  Querying weather: {start_time} to {end_time}")
-    
-    # Query Firemap API
-    timestamp = int(time.time() * 1000)
-    wx_params = {
-        'selection': 'closestTo',
-        'lat': str(lat),
-        'lon': str(lon),
-        'observable': ['wind_speed', 'wind_direction'],
-        'from': start_iso,
-        'to': end_iso,
-        'callback': 'wxData',
-        '_': str(timestamp)
-    }
+
+
     if synthetic:
-        raise NotImplementedError('Load synthetic weather data not yet implemented!!')
-        wind_speed_list, wind_direction_list = load_synthetic_weather_data()
+        wind_speed_list = [20]
+        wind_direction_list = [90]
+
+        return wind_speed_list, wind_direction_list
     else:
+        # Query Firemap API
+        timestamp = int(time.time() * 1000)
+        wx_params = {
+            'selection': 'closestTo',
+            'lat': str(lat),
+            'lon': str(lon),
+            'observable': ['wind_speed', 'wind_direction'],
+            'from': start_iso,
+            'to': end_iso,
+            'callback': 'wxData',
+            '_': str(timestamp)
+        }
+
         try:
             wx_response = requests.get(FIREMAP_WX_URL, params=wx_params, timeout=10)
             wx_text = wx_response.text.strip()
