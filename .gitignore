@@ -218,3 +218,10 @@ __marimo__/
 # Temporary files for FARSITE simulations
 tmp/
 tmp2/
+data/
+landfire_*
+landscape.lcp
+outputs/
+weather_data/
+fire_perimeters/
+outputs/
