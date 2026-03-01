@@ -66,18 +66,6 @@ WRITE_OUTPUTS_EACH_TIMESTEP = 0
 
 
 # ============================================================================
-# ENKF PARAMETERS
-# ============================================================================
-MIN_ENSEMBLE_SIZE       = 300
-ENSEMBLE_SIZE_MULTIPLIER = 5
-
-DEFAULT_OBSERVATION_NOISE = 500    # vsize (meters)
-DEFAULT_MODEL_NOISE       = 200    # wsize (meters)
-DEFAULT_COVARIANCE_SCALE  = 1000.0
-DEFAULT_VERTEX_COUNT      = None   # None = auto-detect
-
-
-# ============================================================================
 # COORDINATE REFERENCE SYSTEMS
 # ============================================================================
 FARSITE_CRS = "EPSG:5070"
@@ -99,11 +87,6 @@ def ensure_directories():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def get_ensemble_size(n_vertices):
-    """Calculate ensemble size based on number of vertices."""
-    return max(MIN_ENSEMBLE_SIZE, ENSEMBLE_SIZE_MULTIPLIER * n_vertices)
 
 
 # Ensure directories exist on import

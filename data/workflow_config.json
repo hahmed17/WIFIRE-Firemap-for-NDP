@@ -6,7 +6,7 @@
   "containment_date": "2025-01-25T01:00:00",
   "duration_days": 0,
   "n_perimeters": 13,
-  "perimeters_path": "/home/jovyan/work/WIFIRE-Digital-Twinners/wildfire-digital-twin/outputs/border_2_synthetic_perimeters.geojson",
+  "perimeters_path": "/home/jovyan/work/WIFIRE-Firemap-for-NDP/outputs/border_2_synthetic_perimeters.geojson",
   "weather_location": {
     "lat": 32.59588662537945,
     "lon": -116.85708741551528
