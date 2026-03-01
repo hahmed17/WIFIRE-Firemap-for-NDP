@@ -2,15 +2,6 @@
 
 {
     set -euo pipefail
-
-    # initialize conda for non-interactive shells
-    # source "$(conda info --base)/etc/profile.d/conda.sh"
-
-    # conda activate base
-    # conda install -c conda-forge gdal -y 
-    
-    # pip -q install -r requirements.txt 
-    #!/usr/bin/env bash
     
     echo "PWD: $(pwd)"
     echo "Python: $(python -c 'import sys; print(sys.executable)')"
@@ -30,4 +21,4 @@
     /opt/conda/bin/python -m pip install --upgrade pip
     /opt/conda/bin/python -m pip install -r requirements.txt
     
-} >install.log 2>&1
+} >tmp/install.log 2>&1

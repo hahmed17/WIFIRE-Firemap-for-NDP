@@ -10,14 +10,28 @@ Provides two functions:
 import requests
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon, MultiPolygon, box, Point
 
 import time
 import json
 import numpy as np
 
+import geojson
+from datetime import datetime
+from pathlib import Path
+import matplotlib.pyplot as plt
+from pyproj import Transformer
 
-from config import FIREMAP_WFS_URL, FIREMAP_WX_URL, FARSITE_CRS
+import zipfile
+from osgeo import gdal, osr
+import io
+import subprocess
+import shapely
+from io import StringIO
+
+import contextily as ctx
+
+from config import *
 import warnings
 
 # ============================================================================
@@ -276,67 +290,51 @@ def fetch_weather(lat, lon, start_dt, end_dt, verbose=True):
             'observations':  pd.DataFrame(),
         }
 
-def create_bbox_from_point(lon, lat, radius_in_miles=10.0, write_geojson=False, output_path="initial_bbox.geojson"):
+def create_bbox_from_point(lon, lat, radius_km=10.0, write_geojson=False, output_path="initial_bbox.geojson"):
     """
-    Create a bounding box with center point (lon, lat) and radius buffer.
-    
+    Create a bounding box (as a buffer polygon) around a geographic point.
+
     Args:
-        lon: Longitude of center point (WGS84)
-        lat: Latitude of center point (WGS84)
-        radius_in_miles: Radius of bounding box in miles (default: 10.0)
-        write_geojson: Whether to write bbox to GeoJSON file (default: False)
-        output_path: Path for output GeoJSON if write_geojson=True
-        
+        lon (float): Longitude of center point (EPSG:4326)
+        lat (float): Latitude of center point (EPSG:4326)
+        radius_km (float): Radius of the buffer in kilometers
+        write_geojson (bool): If True, write output GeoJSON
+        output_path (str): Output path for GeoJSON
+
     Returns:
-        GeoDataFrame with bounding box in EPSG:5070 (FARSITE CRS)
+        GeoDataFrame containing the buffered area (in EPSG:4326)
     """
-    # Create center point
+    # Create center point in WGS84
     center_point = Point(lon, lat)
-    pt = gpd.GeoSeries([center_point], crs="EPSG:4326")
-    
-    # Project to local UTM for accurate buffering
-    pt_utm = pt.to_crs(pt.estimate_utm_crs())
-    
-    # Create buffer
-    radius_meters = radius_in_miles * 1609.344
-    buffer_utm = pt_utm.buffer(radius_meters)
-    
-    # Get bounding box
-    minx, miny, maxx, maxy = buffer_utm.total_bounds
-    
-    # Convert bbox corners back to lon/lat
-    corners_utm = gpd.GeoSeries(
-        [Point(minx, miny), Point(maxx, maxy)],
-        crs=pt_utm.crs
-    ).to_crs("EPSG:4326")
-    
-    min_lon, min_lat = corners_utm.iloc[0].x, corners_utm.iloc[0].y
-    max_lon, max_lat = corners_utm.iloc[1].x, corners_utm.iloc[1].y
-    
-    # Build bbox polygon in WGS84
-    bbox_polygon_wgs84 = Polygon([
-        (min_lon, min_lat),
-        (max_lon, min_lat),
-        (max_lon, max_lat),
-        (min_lon, max_lat),
-        (min_lon, min_lat),
-    ])
-    
-    # Create GeoDataFrame in WGS84 then convert to FARSITE CRS
+    point_gdf = gpd.GeoSeries([center_point], crs="EPSG:4326")
+
+    # Convert to a suitable UTM CRS for accurate distance buffering
+    utm_crs = point_gdf.estimate_utm_crs()
+    point_utm = point_gdf.to_crs(utm_crs)
+
+    # Create buffer (convert km → meters)
+    buffer_utm = point_utm.buffer(radius_km * 1000)
+
+    # Convert buffer back to WGS84
+    buffer_wgs84 = buffer_utm.to_crs("EPSG:4326")
+
+    # Build GeoDataFrame
     bbox_gdf = gpd.GeoDataFrame(
-        [{'type': 'bounding_box', 'radius_miles': radius_in_miles}],
-        geometry=[bbox_polygon_wgs84],
+        {
+            "type": ["bounding_box"],
+            "radius_km": [radius_km],
+        },
+        geometry=[buffer_wgs84.iloc[0]],
         crs="EPSG:4326"
     )
-    bbox_gdf = bbox_gdf.to_crs(FARSITE_CRS)
-    
-    # Optional: Write to GeoJSON
+
+    # Optional: Write GeoJSON
     if write_geojson:
         bbox_feature = geojson.Feature(
-            geometry=bbox_polygon_wgs84,
+            geometry=shapely.geometry.mapping(buffer_wgs84.iloc[0]),
             properties={
                 "type": "bounding_box",
-                "radius_miles": radius_in_miles,
+                "radius_km": radius_km,
                 "center_lon": lon,
                 "center_lat": lat,
             }
@@ -345,8 +343,301 @@ def create_bbox_from_point(lon, lat, radius_in_miles=10.0, write_geojson=False, 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(feature_collection, f, indent=2)
         print(f"✓ Bounding box saved to {output_path}")
-    
+
     return bbox_gdf
+
+
+def verify_landscape_file(lcp_path):
+    """
+    Verify that a landscape (.lcp) file exists.
+    
+    Args:
+        lcp_path: Path to landscape file
+        
+    Returns:
+        bool: True if file exists, False otherwise
+    """
+    exists = Path(lcp_path).exists()
+    
+    if exists:
+        print(f"✓ Landscape file found: {lcp_path}")
+    else:
+        print(f"✗ Landscape file not found: {lcp_path}")
+        print("You need to generate or download a .lcp file for your domain.")
+        print("See FARSITE documentation for landscape file creation.")
+    
+    return exists
+
+def create_prj_file(epsg_code, filename):
+    """
+    Generates a .prj file for a given EPSG code.
+    """
+    spatial_ref = osr.SpatialReference()
+    # Import the coordinate system from the EPSG code
+    if spatial_ref.ImportFromEPSG(epsg_code) == 0:
+        # Morph to ESRI WKT format for compatibility
+        spatial_ref.MorphToESRI()
+        # Export to WKT string
+        wkt_string = spatial_ref.ExportToWkt()
+
+        # Write the WKT string to the .prj file
+        with open(filename, 'w') as f:
+            f.write(wkt_string)
+        print(f"Successfully created {filename} for EPSG:{epsg_code}")
+    else:
+        print(f"Error: Could not import EPSG code {epsg_code}")
+
+def download_landfire_data(
+    poly,
+    output_dir,
+    email,
+    verbose=True
+):
+    """
+    Download LANDFIRE landscape data for a fire location.
+    
+    Args:
+        poly: Polygon object (EPSG:4326)
+        radius_miles: Radius around center point (miles)
+        output_dir: Directory to save downloaded rasters
+        email: Valid email address (required by LANDFIRE)
+        verbose: Print progress
+        
+    Returns:
+        dict with paths to ASCII rasters:
+        {
+            'elevation': Path,
+            'slope': Path,
+            'aspect': Path,
+            'fuel': Path,
+            'canopy_cover': Path,
+            'canopy_height': Path,
+            'canopy_base': Path,
+            'canopy_density': Path
+        }
+    """
+    """Download LANDFIRE landscape data for a fire location."""
+    print("Generating new .lcp file for FARSITE...")
+    print("To use an existing .lcp file instead, call: verify_landscape_file(LCP_PATH)")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+
+    # Add buffer to polygon to avoid size error
+    buffered_poly = poly.buffer(0.5, cap_style='flat', join_style='bevel')
+    
+    if verbose:
+        print(f"Area of Interest: ({buffered_poly.bounds})")
+
+    minx, miny, maxx, maxy = buffered_poly.bounds
+        
+    if verbose:
+        print(f"Downloading LANDFIRE data in bounding box: [{minx:.4f}, {miny:.4f}, {maxx:.4f}, {maxy:.4f}]")
+
+    
+    # Submit LANDFIRE request
+    LFPS_URL = "https://lfps.usgs.gov/api/job/submit"
+    
+    params = {
+        "Email": email,
+        "Layer_List": "250CBD;250CBH;250CC;250CH;250FBFM40;ASP2020;ELEV2020;SLPP2020",
+        "Area_of_Interest": f"{minx} {miny} {maxx} {maxy}",
+        "Output_Projection": "5070",  # NAD83 Albers
+        "Resample_Resolution": "90",
+        "Priority_Code": "K3LS9F"
+    }
+    
+    if verbose:
+        print("\nSubmitting LANDFIRE request...")
+    
+    response = requests.get(LFPS_URL, params=params, timeout=30)
+    response.raise_for_status()
+    
+    job_id = response.json()["jobId"]
+    
+    if verbose:
+        print(f"✓ Job ID: {job_id}")
+        print(f"  Notification will be sent to {email}")
+    
+    # Wait for processing
+    status_url = f"https://lfps.usgs.gov/api/job/status?JobId={job_id}"
+    print(f"\nLFPS Job Status URL: {status_url}")
+
+    if verbose:
+        print("\nWaiting for LANDFIRE processing (takes a couple minutes)...")
+    
+    start_time = time.time()
+    while True:
+        response = requests.get(status_url, timeout=30)
+        
+        status_data = response.json()
+        status = status_data.get("status", "").lower()
+        
+        elapsed = int(time.time() - start_time)
+        
+        if verbose:
+            print(f"  [{elapsed}s] {status}")
+        
+        if status == "succeeded":
+            if verbose:
+                print(f"\n✓ Completed in {elapsed}s")
+            download_url = status_data["outputFile"]
+            break
+        elif status in ("failed", "canceled"):
+            raise RuntimeError(f"LANDFIRE job {status}: {status_data.get('message', '')}")
+        
+        time.sleep(10)
+    
+    # Download and extract
+    if verbose:
+        print("Downloading...")
+    
+    zip_response = requests.get(download_url, stream=True, timeout=60)
+    zip_response.raise_for_status()
+    
+    if verbose:
+        print("Extracting...")
+    
+    with zipfile.ZipFile(io.BytesIO(zip_response.content)) as zf:
+        zf.extractall(output_dir)
+    
+    # Convert multi-band TIFF to ASCII rasters
+    multi_tif = next(output_dir.glob("*.tif"))
+    layer_names = ["250CBD", "250CBH", "250CC", "250CH", "250FBFM40", "ASP2020", "ELEV2020", "SLPP2020"]
+    
+    if verbose:
+        print(f"\nConverting {multi_tif.name} to ASCII rasters...")
+    
+    for band_idx, layer_name in enumerate(layer_names, start=1):
+        asc_path = output_dir / f"{layer_name}.asc"
+        gdal.Translate(str(asc_path), str(multi_tif), format="AAIGrid", bandList=[band_idx])
+        if verbose:
+            print(f"  ✓ {layer_name}.asc")
+    
+    # Return paths in friendly names
+    result = {
+        'elevation': output_dir / "ELEV2020.asc",
+        'slope': output_dir / "SLPP2020.asc",
+        'aspect': output_dir / "ASP2020.asc",
+        'fuel': output_dir / "250FBFM40.asc",
+        'canopy_cover': output_dir / "250CC.asc",
+        'canopy_height': output_dir / "250CH.asc",
+        'canopy_base': output_dir / "250CBH.asc",
+        'canopy_density': output_dir / "250CBD.asc"
+    }
+    
+    if verbose:
+        print(f"\n✓ LANDFIRE data downloaded to {output_dir}/")
+    
+    return result
+
+
+def generate_lcp_from_rasters(
+    output_path,
+    elevation_asc,
+    slope_asc,
+    aspect_asc,
+    fuel_asc,
+    canopy_cover_asc,
+    canopy_height_asc,
+    canopy_base_asc,
+    canopy_density_asc,
+    latitude=None,
+    fuel_model="fb40",
+    verbose=True
+):
+    """
+    Generate FARSITE landscape (.lcp) file from ASCII rasters using lcpmake.
+    
+    Args:
+        output_path: Output .lcp file path
+        elevation_asc: Elevation raster (.asc) in meters
+        slope_asc: Slope raster (.asc) in percent
+        aspect_asc: Aspect raster (.asc) in degrees (0-360)
+        fuel_asc: Fuel model raster (.asc) - integers matching fuel_model
+        canopy_cover_asc: Canopy cover (.asc) in percent (0-100)
+        canopy_height_asc: Canopy height (.asc) in meters * 10
+        canopy_base_asc: Canopy base height (.asc) in meters * 10
+        canopy_density_asc: Canopy bulk density (.asc) in kg/m³ * 100
+        latitude: Center latitude in decimal degrees (auto-detected if None)
+        fuel_model: Fuel model type - "fb40" (FBFM40) or "fb13" (FBFM13)
+        verbose: Print lcpmake command
+        
+    Returns:
+        Path to generated .lcp file
+    """
+    output_path = Path(output_path)
+    lcpmake_exe = Path(LCPMAKE_EXECUTABLE)
+    
+    if not lcpmake_exe.exists():
+        raise FileNotFoundError(
+            f"lcpmake executable not found at {lcpmake_exe}\n"
+            # f"Place lcpmake in {SCRIPT_DIR}/"
+        )
+    
+    # Auto-detect latitude from elevation raster if not provided
+    if latitude is None:
+        ds = gdal.Open(str(elevation_asc))
+        if ds:
+            gt = ds.GetGeoTransform()
+            proj = ds.GetProjection()
+            x_center = gt[0] + (ds.RasterXSize / 2) * gt[1]
+            y_center = gt[3] + (ds.RasterYSize / 2) * gt[5]
+            
+            src_srs = osr.SpatialReference()
+            src_srs.ImportFromWkt(proj)
+            dst_srs = osr.SpatialReference()
+            dst_srs.ImportFromEPSG(4326)
+            transform = osr.CoordinateTransformation(src_srs, dst_srs)
+            lon, lat, _ = transform.TransformPoint(x_center, y_center)
+            latitude = lat
+            ds = None
+            if verbose:
+                print(f"Auto-detected latitude: {latitude:.4f}")
+    
+    # Build lcpmake command
+    cmd = [
+        str(lcpmake_exe),
+        "-latitude", str(latitude),
+        "-landscape", str(output_path.with_suffix('')),
+        "-elevation", str(elevation_asc),
+        "-slope", str(slope_asc),
+        "-aspect", str(aspect_asc),
+        "-fuel", str(fuel_asc),
+        "-cover", str(canopy_cover_asc),
+        "-height", str(canopy_height_asc),
+        "-base", str(canopy_base_asc),
+        "-density", str(canopy_density_asc),
+    ]
+    
+    if fuel_model.lower() in ["fb40", "fbfm40", "40"]:
+        cmd.append("-fb40")
+    elif fuel_model.lower() in ["fb13", "fbfm13", "13"]:
+        cmd.append("-fb13")
+    else:
+        raise ValueError(f"Unknown fuel model: {fuel_model}")
+    
+    if verbose:
+        print("\nRunning lcpmake command:")
+        print(" ".join(cmd))
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"lcpmake failed with return code {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    
+    final_path = output_path.with_suffix('.lcp')
+    
+    if not final_path.exists():
+        raise RuntimeError(f"lcpmake succeeded but output file not found: {final_path}")
+    
+    if verbose:
+        print(f"\n✓ Landscape file created: {final_path}")
+        print(f"  Size: {final_path.stat().st_size / 1024:.1f} KB")
+    
+    return final_path
 
 
 
@@ -374,95 +665,65 @@ def verify_landscape_file(lcp_path):
 
 
 
-def extract_fire_timeline(perimeters_gdf, verbose=True):
+def get_fire_detections(bbox, start_date, satellite_source="LANDSAT_NRT", day_range=5, firms_map_key="b38da98e9b7e9389fd05a00c32f99783"):
     """
-    Extract ignition and containment dates from perimeter GeoDataFrame.
+    Fetch active fire detections from NASA FIRMS API. 
     
     Args:
-        perimeters_gdf: GeoDataFrame with perimeter updates (must have 'datetime' column)
-        verbose: Print timeline information
+        firms_map_key (str): Access key to query NASA FIRMS API.
+        bbox (str): "minLon, minLat, maxLon, maxLat" (WGS84)
+        start_time (str): Start datetime ("%Y-%m-%d")
+        satellite_source (str): satelite source name (options: https://firms.modaps.eosdis.nasa.gov/api/area/)
+            default: "LANDSAT_NRT" (US/Canada only)
+        day_range (int): number between 1-5 of days to query
+            default: 5
         
     Returns:
-        dict with keys: 'ignition_date', 'containment_date', 'duration', 'n_updates'
+        dict
     """
-    ignition_date = perimeters_gdf['datetime'].iloc[0]
-    containment_date = perimeters_gdf['datetime'].iloc[-1]
-    duration = containment_date - ignition_date
-    n_updates = len(perimeters_gdf)
+    minx, miny, maxx, maxy = bbox
+    bbox = f"{minx},{miny},{maxx},{maxy}"
     
-    timeline = {
-        'ignition_date': ignition_date,
-        'containment_date': containment_date,
-        'duration': duration,
-        'n_updates': n_updates
-    }
-    
-    if verbose:
-        print(f"\nFire Timeline:")
-        print(f"  First observation (ignition): {ignition_date}")
-        print(f"  Last observation (containment): {containment_date}")
-        print(f"  Total duration: {duration}")
-        print(f"  Number of updates: {n_updates}")
-    
-    return timeline
+    # Set up base URL
+    FIRMS_API_URL = f"https://firms.modaps.eosdis.nasa.gov/usfs/api/area/csv/{firms_map_key}/{satellite_source}/{bbox}/{day_range}/{start_date}"
 
-
-
-def fetch_fire_perimeters_firms_ogc(fire_name="BORDER 2", bbox=None, 
-                                    start_date=None, end_date=None,
-                                    fire_id=None, verbose=True):
-    """
-    Fetch fire perimeters from FIRMS OGC API.
-    
-    Args:
-        fire_name: Name of fire (for display only)
-        bbox: Bounding box [minLon, minLat, maxLon, maxLat] in WGS84
-        start_date: Start date (YYYY-MM-DD or datetime)
-        end_date: End date (YYYY-MM-DD or datetime)
-        fire_id: Fire ID to filter (required for accurate results)
-        verbose: Print progress
+    try:
+        response = requests.get(FIRMS_API_URL, timeout=30)
+        response.raise_for_status()
+        print(f"\nNASA FIRMS Satellite Response: {response.url}")
         
-    Returns:
-        GeoDataFrame with perimeters (already in EPSG:5070, sorted oldest→newest)
-    """
-    if verbose:
-        print(f"Fetching perimeters for: {fire_name}")
-        print(f"Data source: FIRMS OGC API (actual perimeter polygons)")
-    
-    # Border 2 defaults
-    if bbox is None:
-        bbox = [-117.36, 32.54, -116.04, 33.31]  # San Diego County
-    
-    if start_date is None:
-        start_date = "2025-01-23"
-    
-    if end_date is None:
-        end_date = "2025-01-30"
-    
-    # Convert dates to ISO format
-    if isinstance(start_date, str) and 'T' not in start_date:
-        start_date = f"{start_date}T00:00:00"
-    if isinstance(end_date, str) and 'T' not in end_date:
-        end_date = f"{end_date}T23:59:59"
-    
-    # Fetch from FIRMS
-    from firms_utils import FIRMSPerimeters
-    
-    client = FIRMSPerimeters()
-    perimeters_gdf = client.fetch_fire_perimeters(
-        bbox=bbox,
-        start_datetime=start_date,
-        end_datetime=end_date,
-        fire_id=fire_id,
-        progress=verbose
+        # Parse CSV response
+        csv_data = StringIO(response.text)
+        
+        # Read into DataFrame
+        hotspots_df = pd.read_csv(csv_data)
+        
+        print(f"\n✓ Retrieved {len(hotspots_df)} fire detections")
+        
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 404:
+            print("\n⚠ No fire detections found in this area and time range")
+            hotspots_df = pd.DataFrame()
+        else:
+            print(f"\n❌ API Error: {e}")
+            print("Check your MAP_KEY and try again")
+            raise
+
+    # Display dataframe keys
+    col_names = list(hotspots_df.columns.values)
+    print(f"\nData columns:\n{col_names}")
+
+
+    # Convert to GeoDataFrame with hotspot points
+    geometry = [Point(lon, lat) for lon, lat in zip(hotspots_df['longitude'], hotspots_df['latitude'])]
+    hotspots_gdf = gpd.GeoDataFrame(
+        hotspots_df,
+        geometry=geometry,
+        crs="EPSG:4326"
     )
     
-    # Already sorted oldest→newest and in EPSG:5070
-    if verbose:
-        print(f"\n✓ Retrieved {len(perimeters_gdf)} perimeter updates")
-        print(f"Order: Index 0 = oldest, Index {len(perimeters_gdf)-1} = newest")
-    
-    return perimeters_gdf
+    return hotspots_gdf
+
 
 
 
@@ -559,6 +820,44 @@ def get_weather_location_from_fire(perimeters_gdf, to_wgs84=True):
 
 
 
+def extract_fire_timeline(perimeters_gdf, verbose=True):
+    """
+    Extract ignition and containment dates from perimeter GeoDataFrame.
+    
+    Args:
+        perimeters_gdf: GeoDataFrame with perimeter updates (must have 'datetime' column)
+        verbose: Print timeline information
+        
+    Returns:
+        dict with keys: 'ignition_date', 'containment_date', 'duration', 'n_updates'
+    """
+    ignition_date = perimeters_gdf['datetime'].iloc[0]
+    containment_date = perimeters_gdf['datetime'].iloc[-1]
+    duration = containment_date - ignition_date
+    n_updates = len(perimeters_gdf)
+    
+    timeline = {
+        'ignition_date': ignition_date,
+        'containment_date': containment_date,
+        'duration': duration,
+        'n_updates': n_updates
+    }
+    
+    if verbose:
+        print(f"\nFire Timeline:")
+        print(f"  First observation (ignition): {ignition_date}")
+        print(f"  Last observation (containment): {containment_date}")
+        print(f"  Total duration: {duration}")
+        print(f"  Number of updates: {n_updates}")
+    
+    return timeline
+    
+
+
+
+
+### Visualization
+
 def plot_perimeter_evolution(perimeters_gdf, fire_name="Fire", add_basemap=True):
     """
     Plot fire perimeter evolution over time with OpenStreetMap basemap.
@@ -582,7 +881,7 @@ def plot_perimeter_evolution(perimeters_gdf, fire_name="Fire", add_basemap=True)
         elif boundary.geom_type == 'MultiLineString':
             for line in boundary.geoms:
                 x, y = line.xy
-                ax.plot(x, y, color=colors[idx], linewidth=2.5, zorder=2)
+        ax.plot(x, y, color=colors[idx], linewidth=2.5, zorder=2)
     
     # Add basemap
     if add_basemap:
@@ -611,7 +910,6 @@ def plot_perimeter_evolution(perimeters_gdf, fire_name="Fire", add_basemap=True)
     
     plt.tight_layout()
     plt.show()
-
 
 
 def plot_weather_data(weather_data):
@@ -646,7 +944,108 @@ def plot_weather_data(weather_data):
     plt.show()
 
 
+def plot_active_hotspots(hotspots_gdf):
+    # --- Basic info ---
+    earliest_date = hotspots_gdf['acq_date'].iloc[0]
+    cen_lat = hotspots_gdf['latitude'].iloc[0]
+    cen_lon = hotspots_gdf['longitude'].iloc[0]
+    cen_point = Point(cen_lat, cen_lon)
 
+    # --- Create figure ---
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+
+    # --- Initial invisible plot to determine extent ---
+    hotspots_gdf.plot(
+        ax=ax,
+        color="none",
+        markersize=1,
+        legend=False
+    )
+
+    # --- Expand view ---
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    x_margin = (xlim[1] - xlim[0]) * 2.0
+    y_margin = (ylim[1] - ylim[0]) * 2.0
+    ax.set_xlim(xlim[0] - x_margin, xlim[1] + x_margin)
+    ax.set_ylim(ylim[0] - y_margin, ylim[1] + y_margin)
+
+    # --- Basemap ---
+    try:
+        ctx.add_basemap(
+            ax,
+            crs=hotspots_gdf.crs.to_string(),
+            source=ctx.providers.OpenStreetMap.Mapnik,
+            zoom='auto',
+            alpha=0.6,
+            zorder=0
+        )
+        print("✓ Basemap added")
+    except Exception as e:
+        print(f"Note: Could not add basemap: {e}")
+
+    # --- Plot hotspots manually (Matplotlib scatter) ---
+    ax.scatter(
+        hotspots_gdf.geometry.x,
+        hotspots_gdf.geometry.y,
+        color='orange',       # uniform hotspot color
+        s=200,
+        alpha=0.9,
+        edgecolors='white',
+        linewidths=1.5,
+        zorder=10,
+        label="Fire Detections"
+    )
+
+    # --- Convex hull ---
+    hull = hotspots_gdf.unary_union.convex_hull
+    gpd.GeoSeries([hull], crs=hotspots_gdf.crs).boundary.plot(
+        ax=ax,
+        color='red',
+        linewidth=3,
+        linestyle='--',
+        zorder=11,
+        label='Fire Extent'
+    )
+
+    # --- First and last detections ---
+    first = hotspots_gdf.iloc[0]
+    last = hotspots_gdf.iloc[-1]
+
+    ax.plot(
+        first.geometry.x, first.geometry.y,
+        marker='*', markersize=25,
+        color='lime', markeredgecolor='black',
+        markeredgewidth=2, zorder=15,
+        label='First Detection'
+    )
+
+    ax.plot(
+        last.geometry.x, last.geometry.y,
+        marker='*', markersize=25,
+        color='red', markeredgecolor='black',
+        markeredgewidth=2, zorder=15,
+        label='Last Detection'
+    )
+
+    # --- Formatting ---
+    ax.set_title(
+        f"Active Fire Detections near {cen_point} starting {earliest_date}",
+        fontsize=14, fontweight='bold'
+    )
+    ax.set_xlabel("X (m)", fontsize=11)
+    ax.set_ylabel("Y (m)", fontsize=11)
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3, linestyle=":", linewidth=0.5)
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.95)
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+### Saving final workflow configuration settings
 def save_workflow_config(fire_name, lcp_path, timeline, weather_location, 
                         domain_bounds=None, output_path=None):
     """
