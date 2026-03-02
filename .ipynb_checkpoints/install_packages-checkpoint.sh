@@ -21,4 +21,4 @@
     /opt/conda/bin/python -m pip install --upgrade pip
     /opt/conda/bin/python -m pip install -r requirements.txt
     
-} >tmp/install.log 2>&1
+} >src/install.log 2>&1
