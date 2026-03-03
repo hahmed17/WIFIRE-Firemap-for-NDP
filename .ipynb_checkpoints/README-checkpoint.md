@@ -28,6 +28,7 @@ A full list of Python dependencies is available in `requirements.txt`.
 ---
 
 ## Workspace Structure
+
 ```
 WIFIRE-Firemap-for-NDP/
 │
@@ -36,10 +37,17 @@ WIFIRE-Firemap-for-NDP/
 │
 ├── data/                        # Input data and configuration
 │   ├── workflow_config.json     # Fire parameters shared between notebooks
-│   ├── FIRMS_detections.ipynb   # Active fire detection data (VIIRS/MODIS)
-│   ├── Firemap_perimeters.ipynb # Observed fire perimeter data
-│   ├── Firemap_weather.ipynb    # Weather data retrieval
-│   └── LANDFIRE.ipynb           # Landscape and fuel layer data
+│   ├── FIRMS_detections.ipynb   # Data exploration: active fire detections
+│   ├── Firemap_perimeters.ipynb # Data exploration: fire perimeters
+│   ├── Firemap_weather.ipynb    # Data exploration: weather data
+│   └── LANDFIRE.ipynb           # Data exploration: landscape layers
+│
+├── outputs/                     # Simulation results
+│   ├── border_2_synthetic_farsite_predictions.geojson  # Predicted perimeters for all timesteps
+│   ├── border_2_synthetic_farsite_results.pkl          # Full results dictionary
+│   ├── border_2_synthetic_farsite_results.png          # Perimeter map visualization
+│   ├── border_2_synthetic_initial_bbox.geojson         # Bounding box of the fire area
+│   └── border_2_synthetic_perimeters.geojson           # Full set of perimeters used in the simulation
 │
 ├── src/                         # Source modules used by the notebooks
 │   ├── farsite.py               # FARSITE execution wrapper
@@ -60,7 +68,7 @@ WIFIRE-Firemap-for-NDP/
 
 ### 1. `data_preparation.ipynb`
 
-This notebook retrieves and assembles all the inputs the simulation needs before FARSITE can run. It queries the WIFIRE Firemap platform for each data component and writes them to the `data/` directory, along with a `workflow_config.json` file that records the fire parameters so they can be shared with the simulation notebook without re-entry.
+This notebook retrieves and assembles all the inputs the simulation needs before FARSITE can run. It queries the WIFIRE platform for each data component and writes them to the `data/` directory, along with a `workflow_config.json` file that records the fire parameters so they can be shared with the simulation notebook without re-entry.
 
 The data components it retrieves are:
 
@@ -79,16 +87,18 @@ The simulation produces both a spatial map and quantitative accuracy metrics for
 
 ---
 
-
 ## Outputs
 
-After running `Firemap.ipynb`, the following outputs are written to the `data/` directory:
+After running `Firemap.ipynb`, results are written to the `outputs/` directory:
 
 | File | Description |
 |------|-------------|
-| `<fire_name>_farsite_predictions.geojson` | Predicted fire perimeters for all timesteps (WGS84) |
-| `<fire_name>_farsite_results.pkl` | Full results dictionary including all geometries and weather records |
-| `<fire_name>_farsite_results.png` | Map panels showing predicted vs. observed perimeters at each timestep |
+| `border_2_synthetic_farsite_predictions.geojson` | Predicted fire perimeters for all timesteps (WGS84) |
+| `border_2_synthetic_farsite_results.pkl` | Full results dictionary including all geometries and weather records |
+| `border_2_synthetic_farsite_results.png` | Map panels showing predicted vs. observed perimeters at each timestep |
+| `border_2_synthetic_initial_bbox.geojson` | Bounding box of the Border 2 fire area |
+| `border_2_synthetic_perimeters.geojson` | Full set of perimeters (real + synthetic) used in the simulation |
+
 
 ### Reading the output map
 
